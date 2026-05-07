@@ -92,7 +92,8 @@ async function callAI(messages, system = '', maxTokens = 2000) {
     }));
     const chat   = model.startChat({ history, generationConfig: { maxOutputTokens: maxTokens } });
     const result = await chat.sendMessage(messages[messages.length - 1].content);
-    return { text: result.response.text(), provider: 'gemini' };
+    const raw = result.response.text();
+    return { text: raw.replace(/```[\w]*\n?/gi, '').trim(), provider: 'gemini' };
   } catch (err) {
     console.warn('[Gemini] fallback:', err.message);
     if (!groq) throw new Error('AI service unavailable.');
@@ -100,7 +101,8 @@ async function callAI(messages, system = '', maxTokens = 2000) {
     if (system) msgs.push({ role: 'system', content: system });
     messages.forEach(m => msgs.push({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }));
     const r = await groq.chat.completions.create({ model: 'llama-3.3-70b-versatile', messages: msgs, max_tokens: maxTokens, temperature: 0.7 });
-    return { text: r.choices[0].message.content, provider: 'groq' };
+    const raw = r.choices[0].message.content;
+    return { text: raw.replace(/```[\w]*\n?/gi, '').trim(), provider: 'groq' };
   }
 }
 
@@ -661,12 +663,12 @@ app.post('/api/user/quiz-history', verifyToken, async (req, res) => {
 
 const AI_CONFIGS = {
   doubt:      { xp: 15, maxTokens: 800,  label: 'doubt'      },
-  quiz:       { xp: 5,  maxTokens: 1500, label: 'quiz'       },
-  notes:      { xp: 20, maxTokens: 2500, label: 'notes'      },
-  paper:      { xp: 25, maxTokens: 3000, label: 'paper'      },
-  flashcards: { xp: 15, maxTokens: 1200, label: 'flashcards' },
-  cheatsheet: { xp: 30, maxTokens: 4000, label: 'cheatsheet' },
-  lessonplan: { xp: 30, maxTokens: 4000, label: 'lessonplan' },
+  quiz:       { xp: 5,  maxTokens: 2500, label: 'quiz'       },
+  notes:      { xp: 20, maxTokens: 7500, label: 'notes'      },
+  paper:      { xp: 25, maxTokens: 8000, label: 'paper'      },
+  flashcards: { xp: 15, maxTokens: 1500, label: 'flashcards' },
+  cheatsheet: { xp: 30, maxTokens: 10000, label: 'cheatsheet' },
+  lessonplan: { xp: 30, maxTokens: 10000, label: 'lessonplan' },
 };
 
 app.post('/api/ai/:tool', verifyToken, checkAccess, aiLimiter, async (req, res) => {
