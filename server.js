@@ -663,12 +663,12 @@ app.post('/api/user/quiz-history', verifyToken, async (req, res) => {
 
 const AI_CONFIGS = {
   doubt:      { xp: 15, maxTokens: 800,  label: 'doubt'      },
-  quiz:       { xp: 5,  maxTokens: 2500, label: 'quiz'       },
+  quiz:       { xp: 5,  maxTokens: 7500, label: 'quiz'       },
   notes:      { xp: 20, maxTokens: 7500, label: 'notes'      },
   paper:      { xp: 25, maxTokens: 8000, label: 'paper'      },
-  flashcards: { xp: 15, maxTokens: 1500, label: 'flashcards' },
+  flashcards: { xp: 15, maxTokens: 1200, label: 'flashcards' },
   cheatsheet: { xp: 30, maxTokens: 10000, label: 'cheatsheet' },
-  lessonplan: { xp: 30, maxTokens: 10000, label: 'lessonplan' },
+  lessonplan: { xp: 30, maxTokens: 4000, label: 'lessonplan' },
 };
 
 app.post('/api/ai/:tool', verifyToken, checkAccess, aiLimiter, async (req, res) => {
