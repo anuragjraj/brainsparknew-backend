@@ -666,7 +666,7 @@ const AI_CONFIGS = {
   quiz:       { xp: 5,  maxTokens: 7500, label: 'quiz'       },
   notes:      { xp: 20, maxTokens: 7500, label: 'notes'      },
   paper:      { xp: 25, maxTokens: 8000, label: 'paper'      },
-  flashcards: { xp: 15, maxTokens: 2500, label: 'flashcards' },
+  flashcards: { xp: 15, maxTokens: 2000, label: 'flashcards' },
   cheatsheet: { xp: 30, maxTokens: 10000, label: 'cheatsheet' },
   lessonplan: { xp: 30, maxTokens: 4000, label: 'lessonplan' },
 };
