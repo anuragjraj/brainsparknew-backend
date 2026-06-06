@@ -214,18 +214,19 @@ function verifyAdmin(req, res, next) {
 const FREE_WINDOW_SECONDS = 600; // 10 minutes
 
 async function checkAccess(req, res, next) {
+  // ── FREE ACCESS MODE — all users pass through ──
+  // Uncomment the block below to re-enable the free trial wall:
+  /*
   if (req.user.type === 'school') return next();
 
   const { data: u } = await db.from('users')
     .select('subscription_status, subscription_expires_at, free_tier_started_at')
     .eq('id', req.user.id).single();
 
-  // Active paid subscriber
   if (u?.subscription_status === 'active' && u.subscription_expires_at && new Date(u.subscription_expires_at) > new Date()) {
     return next();
   }
 
-  // First ever AI call — start the clock
   if (!u?.free_tier_started_at) {
     await db.from('users')
       .update({ free_tier_started_at: new Date().toISOString() })
@@ -234,7 +235,6 @@ async function checkAccess(req, res, next) {
     return next();
   }
 
-  // Calculate remaining wall-clock time
   const elapsed   = Math.floor((Date.now() - new Date(u.free_tier_started_at)) / 1000);
   const remaining = FREE_WINDOW_SECONDS - elapsed;
 
@@ -247,7 +247,8 @@ async function checkAccess(req, res, next) {
   }
 
   req.freeSecondsRemaining = remaining;
-  next();
+  */
+  return next();
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -1386,7 +1387,7 @@ app.get('/api/admin/schools', verifyAdmin, async (req, res) => {
 const AI_CONFIGS = {
   doubt:      { xp: 15, maxTokens: 800,  label: 'doubt'      },
   quiz:       { xp: 5,  maxTokens: 7500, label: 'quiz'       },
-  notes:      { xp: 20, maxTokens: 7500, label: 'notes'      },
+  notes:      { xp: 20, maxTokens: 8096, label: 'notes'      },
   paper:      { xp: 25, maxTokens: 8000, label: 'paper'      },
   flashcards: { xp: 15, maxTokens: 2000, label: 'flashcards' },
   cheatsheet: { xp: 30, maxTokens: 8096, label: 'cheatsheet' },
