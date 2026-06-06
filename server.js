@@ -1716,8 +1716,90 @@ function getModuleCount(user) {
 app.get('/api/chapter-courses/list/:key', async (req, res) => {
   const entry = await getCacheEntry(req.params.key);
   if (!entry) return res.json(null);
-  try { res.json(JSON.parse(entry.notes)); }
-  catch { res.json(null); }
+  try {
+    const parsed = JSON.parse(entry.notes);
+    
+    // Check if any modules need reprocessing
+    const modules = parsed?.modules || [];
+    const hasProblems = modules.some(m => 
+      m.status === 'error' || 
+      m.status === 'pending' ||
+      (m.status === 'done' && (!m.videoId || !m.transcriptStatus))
+    );
+    
+    // If more than 30% modules are broken, invalidate entire cache
+    const brokenCount = modules.filter(m => 
+      m.status === 'error' || m.status === 'pending'
+    ).length;
+    
+    if (brokenCount > modules.length * 0.3) {
+      await db.from('chapter_cache').delete().eq('cache_key', req.params.key);
+      return res.json(null); // Forces full regeneration
+    }
+    
+    res.json(parsed);
+  } catch { res.json(null); }
+});
+
+app.post('/api/chapter-courses/module/retry', verifyToken, checkAccess, async (req, res) => {
+  const { subject, cls, chapter, moduleId, moduleTitle, searchQuery } = req.body;
+  if (!subject || !cls || !chapter || moduleId === undefined)
+    return res.status(400).json({ error: 'Missing fields' });
+
+  const modKey = moduleContentKey(subject, cls, chapter, moduleId);
+  const listKey = moduleListKey(subject, cls, chapter);
+
+  res.json({ ok: true }); // respond immediately
+
+  (async () => {
+    try {
+      // Search YouTube
+      const searchQ = `${searchQuery || moduleTitle} ${subject} ${cls} CBSE explained`;
+      const videos  = await ytSearch(searchQ, 5);
+      const { transcript, videoId: bestVidId } = await getBestTranscript(videos);
+      const topVideo = videos.find(v => v.videoId === bestVidId) || videos[0] || null;
+
+      // Regenerate content
+      const content = await aiGenerateModuleContent(
+        moduleTitle, chapter, subject, cls, transcript
+      );
+
+      // Save module content
+      await setCacheEntry(modKey, {
+        moduleId, title: moduleTitle,
+        videoId:         bestVidId || null,
+        videoTitle:      topVideo?.title || null,
+        videoChannel:    topVideo?.channel || null,
+        videoThumbnail:  topVideo?.thumbnail || null,
+        searchResults:   videos,
+        transcript:      transcript || null,
+        transcriptStatus: transcript ? 'success' : bestVidId ? 'unavailable' : 'none',
+        notes:    content.notes,
+        qa:       content.qa,
+        quiz:     content.quiz,
+        generatedAt: new Date().toISOString(),
+      }, { subject, cls, chapter });
+
+      // Update module status in list cache to 'done'
+      const listEntry = await getCacheEntry(listKey);
+      if (listEntry) {
+        const parsed = JSON.parse(listEntry.notes);
+        const idx = parsed.modules.findIndex(m => m.id === moduleId);
+        if (idx > -1) {
+          parsed.modules[idx] = {
+            ...parsed.modules[idx],
+            status:          'done',
+            videoId:         bestVidId || null,
+            videoTitle:      topVideo?.title || null,
+            transcriptStatus: transcript ? 'success' : 'unavailable',
+          };
+          await setCacheEntry(listKey, parsed, { subject, cls, chapter });
+        }
+      }
+    } catch (e) {
+      console.error('[module retry]', e.message);
+    }
+  })();
 });
 
 /**
