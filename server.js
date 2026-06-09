@@ -1508,7 +1508,112 @@ app.post('/api/subscription/verify', verifyToken, async (req, res) => {
   } catch (e) { console.error('[verify]', e); res.status(500).json({ error: 'Verification error.' }); }
 });
 
+function parseDurationSec(iso) {
+  const m = /^P(?:(\d+)D)?T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/.exec(iso || '');
+  if (!m) return 0;
+  return (+(m[1]||0))*86400 + (+(m[2]||0))*3600 + (+(m[3]||0))*60 + (+(m[4]||0));
+}
 
+function indicRatio(str = '') {
+  let indic = 0, latin = 0;
+  for (const ch of str) {
+    const c = ch.codePointAt(0);
+    if (c >= 0x0900 && c <= 0x0DFF) indic++;
+    else if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) latin++;
+  }
+  const total = indic + latin;
+  return total ? indic / total : 0;
+}
+
+async function enrichVideoMetadata(videoIds) {
+  const out = {};
+  if (!process.env.YOUTUBE_API_KEY || !videoIds.length) return out;
+  try {
+    const url = new URL('https://www.googleapis.com/youtube/v3/videos');
+    url.searchParams.set('part', 'snippet,contentDetails,statistics');
+    url.searchParams.set('id',   videoIds.slice(0, 50).join(','));
+    url.searchParams.set('key',  process.env.YOUTUBE_API_KEY);
+    const r    = await fetch(url.toString(), { signal: AbortSignal.timeout(8000) });
+    const data = await r.json();
+    if (!r.ok) { console.warn('[enrichVideoMetadata]', data?.error?.message); return out; }
+    for (const item of data.items || []) {
+      out[item.id] = {
+        audioLang:   (item.snippet?.defaultAudioLanguage || item.snippet?.defaultLanguage || '').toLowerCase(),
+        caption:     item.contentDetails?.caption || 'false',
+        durationSec: parseDurationSec(item.contentDetails?.duration),
+        viewCount:   parseInt(item.statistics?.viewCount || '0', 10),
+      };
+    }
+  } catch (e) { console.warn('[enrichVideoMetadata error]', e.message?.slice(0, 80)); }
+  return out;
+}
+
+function scoreVideo(v, ctx) {
+  let score = 0;
+  const title = (v.title || '').toLowerCase();
+  const desc  = (v.description || '').toLowerCase();
+  const meta  = v.meta || {};
+
+  if (meta.audioLang.startsWith('en'))      score += 55;
+  else if (meta.audioLang.startsWith('hi')) score -= 50;
+  else if (meta.audioLang)                  score -= 18;
+
+  const ti = indicRatio(v.title || '');
+  if (ti > 0.15)   score -= 60;
+  else if (ti > 0) score -= 15;
+  if (/\benglish\b/.test(title))            score += 12;
+  if (/\bhindi\b|हिंदी|हिन्दी/.test(title))   score -= 45;
+
+  if (meta.caption === 'true') score += 25;
+
+  for (const kw of (ctx.keywords || [])) {
+    const k = (kw || '').toLowerCase().trim();
+    if (!k) continue;
+    if (title.includes(k))     score += 8;
+    else if (desc.includes(k)) score += 3;
+  }
+  if (title.includes('cbse'))                                   score += 10;
+  if (ctx.cls     && title.includes(ctx.cls.toLowerCase()))     score += 8;
+  if (ctx.subject && title.includes(ctx.subject.toLowerCase())) score += 6;
+
+  const d = meta.durationSec || 0;
+  if (d) {
+    if      (d < 120)   score -= 30;
+    else if (d < 300)   score -= 5;
+    else if (d <= 1800) score += 15;
+    else if (d <= 3600) score += 3;
+    else                score -= 10;
+  }
+
+  if (meta.viewCount > 0) score += Math.min(Math.log10(meta.viewCount) * 4, 25);
+  if (ctx.usedVideoIds?.has(v.videoId)) score -= 1000;
+
+  return score;
+}
+
+async function ytSearchRanked(query, ctx = {}, n = 12) {
+  const raw = await ytSearch(query, n);
+  if (!raw.length) return [];
+  const metaMap = await enrichVideoMetadata(raw.map(v => v.videoId).filter(Boolean));
+  const scored  = raw.map(v => {
+    const withMeta = { ...v, meta: metaMap[v.videoId] || {} };
+    return { ...withMeta, _score: scoreVideo(withMeta, ctx) };
+  });
+  scored.sort((a, b) => b._score - a._score);
+  return scored;
+}
+
+async function pickModuleVideo(query, ctx, n = 12) {
+  const ranked = await ytSearchRanked(query, ctx, n);
+  let pool = ranked.filter(v => !ctx.usedVideoIds?.has(v.videoId));
+  if (!pool.length) pool = ranked;
+  for (const v of pool.slice(0, 6)) {
+    const t = await ytTranscript(v.videoId);
+    if (t && t.length >= 500) return { video: v, videoId: v.videoId, transcript: t, candidates: pool };
+  }
+  const top = pool[0] || null;
+  return { video: top, videoId: top?.videoId || null, transcript: null, candidates: pool };
+}
 
 async function ytSearch(query, n = 5) {
   if (!process.env.YOUTUBE_API_KEY) return [];
@@ -1755,10 +1860,18 @@ app.post('/api/chapter-courses/module/retry', verifyToken, checkAccess, async (r
   (async () => {
     try {
       // Search YouTube
-      const searchQ = `${searchQuery || moduleTitle} ${subject} ${cls} CBSE explained`;
-      const videos  = await ytSearch(searchQ, 5);
-      const { transcript, videoId: bestVidId } = await getBestTranscript(videos);
-      const topVideo = videos.find(v => v.videoId === bestVidId) || videos[0] || null;
+      const listEntry0 = await getCacheEntry(listKey);
+      const usedVideoIds = new Set();
+      if (listEntry0) {
+        try {
+          const p = JSON.parse(listEntry0.notes);
+          for (const m of p.modules || []) if (m.id !== moduleId && m.videoId) usedVideoIds.add(m.videoId);
+        } catch {}
+      }
+      const searchQ = `${searchQuery || moduleTitle} ${subject} ${cls} CBSE in English`;
+      const ctx = { keywords: [moduleTitle], subject, cls, usedVideoIds };
+      const { video: topVideo, videoId: bestVidId, transcript, candidates } = await pickModuleVideo(searchQ, ctx, 12);
+      const videos = candidates;
 
       // Regenerate content
       const content = await aiGenerateModuleContent(
@@ -2037,18 +2150,18 @@ async function generateChapterCourse(listKey, subject, cls, chapter, moduleCount
 
     // ── Step 2: Process each module sequentially ──────────────
     // Sequential gives better quality (no rate-limit collisions)
+    const usedVideoIds = new Set();
     for (const mod of modules) {
       const modKey = moduleContentKey(subject, cls, chapter, mod.id);
       emit({ type: 'module_building', moduleId: mod.id, title: mod.title });
 
       try {
         // Search YouTube
-        const searchQ = `${mod.searchQuery || mod.title} ${subject} ${cls} CBSE explained`;
-        const videos  = await ytSearch(searchQ, 5);
-
-        // Get best transcript
-        const { transcript, videoId: bestVidId } = await getBestTranscript(videos);
-        const topVideo = videos.find(v => v.videoId === bestVidId) || videos[0] || null;
+        const searchQ = `${mod.searchQuery || mod.title} ${subject} ${cls} CBSE in English`;
+        const ctx = { keywords: [mod.title, ...(mod.keyTopics || [])], subject, cls, usedVideoIds };
+        const { video: topVideo, videoId: bestVidId, transcript, candidates } = await pickModuleVideo(searchQ, ctx, 12);
+        if (bestVidId) usedVideoIds.add(bestVidId);
+        const videos = candidates;
 
         // Generate content
         const content = await aiGenerateModuleContent(
@@ -2121,6 +2234,7 @@ async function resumeChapterCourse(listKey, subject, cls, chapter, existingModul
 
   const emit = data => emitter.emit('update', data);
   const skeleton = [...existingModules];
+  const usedVideoIds = new Set(existingModules.filter(m => m.videoId).map(m => m.videoId));
 
   // Find modules that need to be built
   const pending = existingModules.filter(m =>
@@ -2141,10 +2255,11 @@ async function resumeChapterCourse(listKey, subject, cls, chapter, existingModul
     emit({ type: 'module_building', moduleId: mod.id, title: mod.title });
 
     try {
-      const searchQ = `${mod.searchQuery || mod.title} ${subject} ${cls} CBSE explained`;
-      const videos  = await ytSearch(searchQ, 5);
-      const { transcript, videoId: bestVidId } = await getBestTranscript(videos);
-      const topVideo = videos.find(v => v.videoId === bestVidId) || videos[0] || null;
+      const searchQ = `${mod.searchQuery || mod.title} ${subject} ${cls} CBSE in English`;
+      const ctx = { keywords: [mod.title, ...(mod.keyTopics || [])], subject, cls, usedVideoIds };
+      const { video: topVideo, videoId: bestVidId, transcript, candidates } = await pickModuleVideo(searchQ, ctx, 12);
+      if (bestVidId) usedVideoIds.add(bestVidId);
+      const videos = candidates;
 
       const content = await aiGenerateModuleContent(
         mod.title, chapter, subject, cls, transcript
