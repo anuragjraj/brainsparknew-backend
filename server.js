@@ -1577,9 +1577,10 @@ function scoreVideo(v, ctx) {
   const desc  = (v.description || '').toLowerCase();
   const meta  = v.meta || {};
 
-  if (meta.audioLang.startsWith('en'))      score += 55;
-  else if (meta.audioLang.startsWith('hi')) score -= 50;
-  else if (meta.audioLang)                  score -= 18;
+  const audioLang = meta.audioLang || '';
+  if (audioLang.startsWith('en'))      score += 55;
+  else if (audioLang.startsWith('hi')) score -= 50;
+  else if (audioLang)                  score -= 18;
 
   const ti = indicRatio(v.title || '');
   if (ti > 0.15)   score -= 60;
@@ -1637,9 +1638,12 @@ async function pickModuleVideo(query, ctx, n = 25) {
     `${ctx.subject} ${ctx.cls} ${kw} English`.trim(),
   ];
 
+  // ── Main loop: collect fresh, English, unused videos ──
   let pool = [];
+  let allRanked = [];                         // ← keep everything we fetched
   for (const q of queries) {
     const ranked = await ytSearchRanked(q, ctx, perQuery);
+    allRanked.push(...ranked);                // ← remember it
     const fresh = ranked.filter(v =>
       v.videoId &&
       !ctx.usedVideoIds?.has(v.videoId) &&
@@ -1650,20 +1654,14 @@ async function pickModuleVideo(query, ctx, n = 25) {
     if (pool.length >= 6) break;
   }
 
-  // ▼▼▼ INSERT THE LAST-RESORT BLOCK HERE ▼▼▼
-  // Absolute last resort: reuse a previously-used English video rather than leave the module blank
-  if (!pool.length) {
-    for (const q of queries) {
-      const ranked = await ytSearchRanked(q, ctx, perQuery);
-      const eng = ranked.filter(v => v.videoId && !isNonEnglishVideo(v)); // English, repeats allowed
-      if (eng.length) {
-        eng.sort((a, b) => (b._score || 0) - (a._score || 0));
-        pool = eng;
-        break;
-      }
-    }
+  // ── Last resort: reuse already-fetched results (English, repeats allowed) ──
+  if (!pool.length && allRanked.length) {
+    const seen = new Set();
+    pool = allRanked.filter(v =>
+      v.videoId && !isNonEnglishVideo(v) && !seen.has(v.videoId) && seen.add(v.videoId)
+    );
+    pool.sort((a, b) => (b._score || 0) - (a._score || 0));
   }
-  // ▲▲▲ END OF INSERTED BLOCK ▲▲▲
 
   if (!pool.length) return { video: null, videoId: null, transcript: null, candidates: [] };
 
