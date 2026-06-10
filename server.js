@@ -1883,7 +1883,55 @@ function getModuleCount(user) {
 /**
  * GET /api/chapter-courses/list/:key
  * Returns the cached module list for a chapter (or null if not generated yet).
+ * 
+ * 
  */
+
+// Get the current user's completed module IDs for one course
+app.get('/api/chapter-courses/progress/:key', verifyToken, async (req, res) => {
+  try {
+    const { data } = await db.from('module_progress')
+      .select('module_id')
+      .eq('user_id', req.user.id)
+      .eq('course_key', req.params.key);
+    res.json((data || []).map(r => r.module_id));
+  } catch (e) {
+    console.error('[progress get]', e.message);
+    res.json([]);
+  }
+});
+
+// Mark a module complete for the current user
+app.post('/api/chapter-courses/progress', verifyToken, async (req, res) => {
+  try {
+    const { courseKey, moduleId } = req.body;
+    if (!courseKey || moduleId === undefined)
+      return res.status(400).json({ error: 'courseKey and moduleId required' });
+    await db.from('module_progress').upsert({
+      user_id:    req.user.id,
+      course_key: courseKey,
+      module_id:  moduleId,
+    }, { onConflict: 'user_id,course_key,module_id', ignoreDuplicates: true });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[progress post]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Un-mark a module (delete completion) for the current user
+app.delete('/api/chapter-courses/progress/:key/:moduleId', verifyToken, async (req, res) => {
+  try {
+    await db.from('module_progress').delete()
+      .eq('user_id', req.user.id)
+      .eq('course_key', req.params.key)
+      .eq('module_id', parseInt(req.params.moduleId, 10));
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[progress delete]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 app.get('/api/chapter-courses/list/:key', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store')
   const entry = await getCacheEntry(req.params.key);
