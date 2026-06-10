@@ -1748,69 +1748,105 @@ async function getBestTranscript(videos) {
 
 /** Generate the list of 8-15 modules for a chapter using Claude */
 async function aiGenerateModuleList(subject, cls, chapter, moduleCount = 10) {
-  const prompt = `You are an expert CBSE curriculum designer.
-Break down the CBSE chapter "${chapter}" (${subject}, ${cls}) into exactly ${moduleCount} focused learning modules.
-Each module should cover a distinct sub-topic that can be taught via a single YouTube video (10-20 min).
-Module ${moduleCount} should be a "Practice & Exam Tips" or "Solved Examples" module.
+  const g = getGradeBand(cls)
+  const classNum = (String(cls).match(/\d+/) || [''])[0]
+
+  const prompt = `You are a senior CBSE curriculum designer who has taught the NCERT ${subject} textbook for ${cls} for 20 years. You know the exact chapter structure, section headings, and in-text + exercise topics of the official NCERT/CBSE textbook.
+
+TASK: Break the NCERT chapter "${chapter}" (${subject}, ${cls}, CBSE board) into exactly ${moduleCount} learning modules.
+
+STEP 1 — RECALL (think internally, do NOT output this):
+List the actual sub-topics / section headings that appear in THIS specific NCERT chapter for ${cls}. Use only real syllabus content — do not invent topics that belong to a different class or board.
+
+STEP 2 — BUILD MODULES:
+- Every module MUST map to a genuine NCERT sub-topic of "${chapter}". No off-syllabus, no padding.
+- Order modules in the SAME sequence the NCERT textbook teaches them (foundational to advanced).
+- Each module = one teachable sub-topic coverable by a single 10-20 min video.
+- The final module must be "Solved Examples / Exam Practice" reflecting CBSE question patterns.
+- keyTopics must be the actual NCERT terms/keywords for that sub-topic.
+
+GRADE CALIBRATION (${g.band}):
+- ${g.depth}
+- Exam framing: ${g.exam}
+
+SEARCH QUERY RULES:
+- Format: "<exact NCERT sub-topic> ${chapter} class ${classNum} ${subject} CBSE NCERT"
+- Use precise textbook terminology, not paraphrases.
 
 Return ONLY valid JSON (no markdown):
 {
   "modules": [
     {
       "id": 1,
-      "title": "Introduction to ${chapter}",
-      "description": "Brief description under 40 words",
+      "title": "Exact NCERT sub-topic name",
+      "description": "What this sub-topic covers, under 40 words, grade-appropriate",
       "emoji": "🔢",
       "estimatedMinutes": 15,
-      "keyTopics": ["topic1", "topic2", "topic3"],
-      "searchQuery": "specific YouTube search query for this sub-topic CBSE"
+      "ncertSection": "the NCERT section this maps to",
+      "keyTopics": ["real NCERT keyword 1", "keyword 2", "keyword 3"],
+      "searchQuery": "<sub-topic> ${chapter} class ${classNum} ${subject} CBSE NCERT"
     }
   ]
-}`;
-  const r = await callAI([{ role: 'user', content: prompt }], '', 2000, 'notes');
+}`
+
+  const r = await callAI([{ role: 'user', content: prompt }], '', 2500, 'notes')
   try {
-    const parsed = JSON.parse(r.text.replace(/```[\w]*\n?/g, '').trim());
-    return parsed?.modules || null;
-  } catch { return null; }
+    const parsed = JSON.parse(r.text.replace(/```[\w]*\n?/g, '').trim())
+    const mods = parsed?.modules
+    if (!Array.isArray(mods) || !mods.length) return null
+    return mods.map((m, i) => ({ ...m, id: i + 1 }))
+  } catch { return null }
 }
 
 /** Generate notes + Q&A + quiz for one module using transcript (or fallback to topic knowledge) */
 async function aiGenerateModuleContent(moduleTitle, chapter, subject, cls, transcript) {
-  const transcriptSection = transcript
-    ? `Use this YouTube video transcript as your PRIMARY source. Base notes, Q&A and quiz STRICTLY on what the transcript teaches:\n\n"${transcript.slice(0, 7000)}"\n\nSupplement with CBSE knowledge only where the transcript is insufficient.`
-    : `No transcript available. Use your expert CBSE knowledge of "${moduleTitle}" in ${subject} ${cls}.`;
+  const g = getGradeBand(cls)
 
-  const prompt = `You are an expert CBSE teacher creating learning content.
+  const transcriptSection = transcript
+    ? `A YouTube video transcript is provided below. Use it as a teaching reference for explanation style and worked examples, BUT the authority is the NCERT/CBSE syllabus — if the transcript drifts off-syllabus, is wrong, or covers a different class's content, IGNORE that part and rely on the official NCERT ${cls} content.\n\nTRANSCRIPT:\n"${transcript.slice(0, 7000)}"`
+    : `No transcript available. Use your expert knowledge of the official NCERT/CBSE ${subject} ${cls} textbook for "${moduleTitle}".`
+
+  const prompt = `You are an expert CBSE teacher creating syllabus-accurate learning content.
+
 Module: "${moduleTitle}"
-Chapter: "${chapter}" | Subject: ${subject} | Class: ${cls} | Board: CBSE
+Chapter: "${chapter}" | Subject: ${subject} | Class: ${cls} | Board: CBSE (NCERT)
+
+GRADE CALIBRATION (${g.band}):
+- ${g.depth}
+- Exam framing: ${g.exam}
+
+CURRICULUM RULES:
+- Cover ONLY what the NCERT ${cls} textbook teaches for this sub-topic. No off-syllabus content.
+- Use exact NCERT terminology, notation and definitions.
+- Quiz and Q&A must match CBSE question patterns for ${cls}.
 
 ${transcriptSection}
 
 Return ONLY valid JSON (no markdown, no preamble):
 {
   "notes": {
-    "summary": "3-4 substantial paragraphs covering the module content",
-    "keyConcepts": [{"term": "string", "definition": "1-2 sentences"}],
-    "keyPoints": ["10 key points as complete sentences with explanation"],
-    "formulas": ["formulas with units and when to use them — empty array if not applicable"],
-    "solvedExample": "One worked example relevant to this module (null if not applicable)",
-    "commonMistakes": ["3 common mistakes students make"],
-    "examTips": ["3 specific exam tips for this sub-topic"]
+    "summary": "3-4 substantial NCERT-aligned paragraphs",
+    "keyConcepts": [{"term": "NCERT term", "definition": "1-2 sentences"}],
+    "keyPoints": ["10 key points as complete, syllabus-accurate sentences"],
+    "formulas": ["formulas with units and when used — [] if not applicable for this class"],
+    "solvedExample": "One NCERT-style worked example (null if not applicable)",
+    "commonMistakes": ["3 mistakes CBSE students make here"],
+    "examTips": ["3 CBSE exam tips specific to this sub-topic"]
   },
   "qa": [
-    {"q": "question", "a": "3-4 sentence answer", "difficulty": "Easy|Medium|Hard"}
+    {"q": "CBSE-style question", "a": "3-4 sentence answer", "difficulty": "Easy|Medium|Hard"}
   ],
   "quiz": [
-    {"q": "question text", "opts": ["A", "B", "C", "D"], "ans": 0, "exp": "explanation why correct"}
+    {"q": "MCQ text", "opts": ["A", "B", "C", "D"], "ans": 0, "exp": "why correct"}
   ]
 }
-Include exactly 6 Q&A items and 8 quiz questions. "ans" is 0-indexed.`;
+Include exactly 6 Q&A items and 8 quiz questions. "ans" is 0-indexed.`
 
-  const r = await callAI([{ role: 'user', content: prompt }], '', 5000, 'notes');
+  const r = await callAI([{ role: 'user', content: prompt }], '', 5000, 'notes')
   try {
-    const parsed = JSON.parse(r.text.replace(/```[\w]*\n?/g, '').trim());
-    if (!parsed?.notes) throw new Error('No notes');
-    return { notes: parsed.notes, qa: parsed.qa || [], quiz: parsed.quiz || [] };
+    const parsed = JSON.parse(r.text.replace(/```[\w]*\n?/g, '').trim())
+    if (!parsed?.notes) throw new Error('No notes')
+    return { notes: parsed.notes, qa: parsed.qa || [], quiz: parsed.quiz || [] }
   } catch {
     return {
       notes: {
@@ -1818,7 +1854,7 @@ Include exactly 6 Q&A items and 8 quiz questions. "ans" is 0-indexed.`;
         keyConcepts: [], keyPoints: [], formulas: [], solvedExample: null, commonMistakes: [], examTips: [],
       },
       qa: [], quiz: [],
-    };
+    }
   }
 }
 
@@ -1869,6 +1905,31 @@ async function setCacheEntry(key, payload, meta = {}) {
 // ════════════════════════════════════════════════════════════════
 //  MODULE COUNT based on role
 // ════════════════════════════════════════════════════════════════
+
+function getGradeBand(cls) {
+  const n = parseInt((String(cls).match(/\d+/) || ['10'])[0], 10)
+  if (n <= 5) return {
+    band: 'Primary (foundational)',
+    depth: 'Use very simple language, concrete examples, stories and visuals. No heavy formulae. Focus on understanding and curiosity.',
+    exam: 'Light periodic-test style questions only.',
+  }
+  if (n <= 8) return {
+    band: 'Upper Primary / Middle',
+    depth: 'Clear explanations with everyday examples. Introduce basic formulae and definitions. Build conceptual foundation.',
+    exam: 'CBSE periodic test / SA-style short and long answer questions.',
+  }
+  if (n <= 10) return {
+    band: 'Secondary (Board)',
+    depth: 'Rigorous, exam-oriented. Full definitions, derivations, diagrams, NCERT in-text and exercise coverage.',
+    exam: 'CBSE Board pattern — MCQ, assertion-reason, case-based, short and long answer with stepwise marking.',
+  }
+  return {
+    band: 'Senior Secondary (Board)',
+    depth: 'University-prep rigor. Complete derivations, mechanisms, numericals, edge cases. NCERT + NCERT Exemplar level.',
+    exam: 'CBSE Class 11/12 Board pattern incl. competency-based and HOTS questions.',
+  }
+}
+
 function getModuleCount(user) {
   // Teachers / pro: 12 modules; Students: 10
   if (user.role === 'teacher') return 12;
@@ -2253,7 +2314,8 @@ async function generateChapterCourse(listKey, subject, cls, chapter, moduleCount
 
       try {
         // Search YouTube
-        const searchQ = `${mod.searchQuery || mod.title} ${subject} ${cls} CBSE in English`;
+        const classNum = (String(cls).match(/\d+/) || [''])[0]
+        const searchQ = `${mod.searchQuery || mod.title} class ${classNum} ${subject} CBSE NCERT English`;
         const ctx = { keywords: [mod.title, ...(mod.keyTopics || [])], subject, cls, usedVideoIds };
         const { video: topVideo, videoId: bestVidId, transcript, candidates } = await pickModuleVideo(searchQ, ctx, 12);
         if (bestVidId) usedVideoIds.add(bestVidId);
