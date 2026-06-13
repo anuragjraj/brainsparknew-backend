@@ -32,7 +32,7 @@ const crypto           = require('crypto');
 const multer           = require('multer');
 const csv              = require('csv-parser');
 const stream           = require('stream');
-const { callAIWithMath, verifyAnswerKey } = require('./mathEngine');
+// const { callAIWithMath, verifyAnswerKey } = require('./mathEngine');
 let YoutubeTranscript;
 try {
   ({ YoutubeTranscript } = require('youtube-transcript'));
@@ -47,6 +47,7 @@ require('dotenv').config();
 // ════════════════════════════════════════════════════════════════
 const app  = express();
 const PORT = process.env.PORT || 5000;
+app.set('trust proxy', 1);
 
 // Render/Vercel/etc. sit behind a proxy — trust the first hop so
 // express-rate-limit can read the real client IP from X-Forwarded-For
@@ -1430,35 +1431,7 @@ app.post('/api/ai/:tool', verifyToken, checkAccess, aiLimiter, async (req, res) 
     if (!Array.isArray(messages) || !messages.length)
       return res.status(400).json({ error: 'Messages array required' });
 
-    let text, provider;
-    const useMath = MATH_SUBJECTS.includes(subject) && MATH_TOOLS.has(req.params.tool);
-
-    if (useMath) {
-      // exact-math path WITH full fallback (Claude → OpenAI → Groq), each with SymPy
-      try {
-        const r = await callAIWithMath({ anthropic, openai, groq }, {
-          messages, system, maxTokens: cfg.maxTokens,
-        });
-        text = r.text; provider = r.provider;
-        // If the engine refused because compute was down, degrade to normal generation
-        if (isComputeRefusal(text)) {
-          console.warn('[math engine returned a compute-unavailable refusal — falling back to callAI]');
-          ({ text, provider } = await callAI(messages, system, cfg.maxTokens, cfg.label));
-        }
-      } catch (e) {
-        console.warn('[math engine threw — falling back to callAI]', e.message?.slice(0, 120));
-        ({ text, provider } = await callAI(messages, system, cfg.maxTokens, cfg.label));
-      }
-    } else {
-      // plain generation path (now used for notes/cheatsheet/lessonplan/flashcards/doubt)
-      ({ text, provider } = await callAI(messages, system, cfg.maxTokens, cfg.label));
-    }
-
-    // Final safety net: never return / save a refusal stub as if it were content
-    if (isComputeRefusal(text)) {
-      console.error(`[AI /${req.params.tool}] still a refusal after fallback — not saving`);
-      return res.status(503).json({ error: 'Generation service is busy. Please try again in a moment.' });
-    }
+    const { text, provider } = await callAI(messages, system, cfg.maxTokens, cfg.label);
 
     logActivity(req.user.id, cfg.label, { subject, chapter, chapters, xpEarned: cfg.xp, provider, meta: { subject, chapter } }).catch(console.error);
     const resp = { content: text, xpEarned: cfg.xp, provider };
