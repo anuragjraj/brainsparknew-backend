@@ -32,6 +32,7 @@ const crypto           = require('crypto');
 const multer           = require('multer');
 const csv              = require('csv-parser');
 const stream           = require('stream');
+const { callAIWithMath, verifyAnswerKey } = require('./mathEngine');
 let YoutubeTranscript;
 try {
   ({ YoutubeTranscript } = require('youtube-transcript'));
@@ -841,29 +842,40 @@ app.get('/api/search', verifyToken, async (req, res) => {
 app.get('/api/profiles/:userId', verifyToken, async (req, res) => {
   try {
     const { userId } = req.params;
-    // School isolation check
+
     if (req.user.type === 'school') {
       const [{ data: me }, { data: them }] = await Promise.all([
-        db.from('users').select('school_id').eq('id', req.user.id).single(),
-        db.from('users').select('school_id').eq('id', userId).single(),
+        db.from('users').select('school_id').eq('id', req.user.id).maybeSingle(),
+        db.from('users').select('school_id').eq('id', userId).maybeSingle(),
       ]);
-      if (!them || me.school_id !== them.school_id)
+      if (!them || me?.school_id !== them.school_id)
         return res.status(403).json({ error: 'Cannot view profiles from other schools' });
     }
+
     const [userRes, profileRes, xpRes] = await Promise.all([
-      db.from('users').select('id, name, role, class_level, section, subject_specialization, school_id, created_at, type, bio, avatar_url').eq('id', userId).single(),
+      db.from('users').select('id, name, role, class_level, section, subject_specialization, school_id, created_at, type, bio, avatar_url').eq('id', userId).maybeSingle(),
       db.from('user_profiles').select('*').eq('user_id', userId).maybeSingle(),
-      db.from('user_xp').select('total_xp, current_streak, doubts_solved, quizzes_done, notes_made, papers_made, cheat_sheets_made, lesson_plans_made').eq('user_id', userId).single(),
+      db.from('user_xp').select('total_xp, current_streak, doubts_solved, quizzes_done, notes_made, papers_made, cheat_sheets_made, lesson_plans_made').eq('user_id', userId).maybeSingle(),
     ]);
-    // XP rank
-    const { data: rankData } = await db.rpc('get_xp_ranking', { p_user_id: userId }).catch(() => ({ data: null }));
+
+    if (!userRes.data) return res.status(404).json({ error: 'User not found' });
+
+    let rankData = null;
+    try {
+      const { data } = await db.rpc('get_xp_ranking', { p_user_id: userId });
+      rankData = data;
+    } catch { /* RPC optional — ignore if missing */ }
+
     res.json({
       user:    userRes.data,
       profile: profileRes.data || {},
       stats:   xpRes.data || {},
       rank:    rankData?.[0] || {},
     });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    console.error('[profiles get]', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.put('/api/profiles/me', verifyToken, async (req, res) => {
@@ -1394,20 +1406,35 @@ const AI_CONFIGS = {
   lessonplan: { xp: 30, maxTokens: 4000, label: 'lessonplan' },
 };
 
+const MATH_SUBJECTS = ['Mathematics', 'Physics', 'Chemistry'];
 app.post('/api/ai/:tool', verifyToken, checkAccess, aiLimiter, async (req, res) => {
   const cfg = AI_CONFIGS[req.params.tool];
   if (!cfg) return res.status(400).json({ error: `Unknown tool: ${req.params.tool}` });
   try {
     const { messages, system = '', subject = '', chapter = '', chapters = [] } = req.body;
-    if (!Array.isArray(messages) || !messages.length) return res.status(400).json({ error: 'Messages array required' });
-    const { text, provider } = await callAI(messages, system, cfg.maxTokens, cfg.label);
+    if (!Array.isArray(messages) || !messages.length)
+      return res.status(400).json({ error: 'Messages array required' });
+
+    let text, provider;
+    if (MATH_SUBJECTS.includes(subject)) {
+      // exact-math path WITH full fallback (Claude → OpenAI → Groq), each with SymPy
+      const r = await callAIWithMath({ anthropic, openai, groq }, {
+        messages, system, maxTokens: cfg.maxTokens,
+      });
+      text = r.text; provider = r.provider;
+    } else {
+      // your original path, untouched
+      ({ text, provider } = await callAI(messages, system, cfg.maxTokens, cfg.label));
+    }
+
     logActivity(req.user.id, cfg.label, { subject, chapter, chapters, xpEarned: cfg.xp, provider, meta: { subject, chapter } }).catch(console.error);
     const resp = { content: text, xpEarned: cfg.xp, provider };
     if (req.freeSecondsRemaining !== undefined) resp.secondsRemaining = req.freeSecondsRemaining;
     res.json(resp);
   } catch (e) {
     console.error(`[AI /${req.params.tool}]`, e.message);
-    if (e.message?.includes('429') || e.message?.includes('rate_limit')) return res.status(429).json({ error: 'AI is busy. Try again in a moment.' });
+    if (e.message?.includes('429') || e.message?.includes('rate_limit'))
+      return res.status(429).json({ error: 'AI is busy. Try again in a moment.' });
     res.status(500).json({ error: 'AI service error.' });
   }
 });
